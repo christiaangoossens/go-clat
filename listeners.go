@@ -140,23 +140,25 @@ func listenPCAP(iface string, address net.IP, nat64Prefix *net.IPNet) {
 	// Filter to specific source & destinations (I'm only interested if this is the destination)
 	filter := fmt.Sprintf("src net %s and dst net %s", sourceNet, destNet)
 
-	log.Printf("Using filter string %s", filter)
-
 	if err := handle.SetBPFFilter(filter); err != nil {
 		log.Fatalf("Error setting BPF filter: %v", err)
 	}
 
-	fmt.Println("Listening for IPv6 packets...")
+	log.Printf(
+		"Listening for IPv6 return packets from the NAT64 prefix %s on interface %s",
+		sourceNet,
+		iface,
+	)
 
 	// Use a packet source to read packets
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
-		fmt.Println("Packet captured")
+		log.Printf("Packet captured")
 
 		// Extract the IPv6 layer from the packet
 		if ipv6Layer := packet.Layer(layers.LayerTypeIPv6); ipv6Layer != nil {
 			ipv6, _ := ipv6Layer.(*layers.IPv6) // Assert type
-			fmt.Printf(
+			log.Printf(
 				"IPv6 Src: %s -> Dst: %s, protocol: %s\n",
 				ipv6.SrcIP,
 				ipv6.DstIP,

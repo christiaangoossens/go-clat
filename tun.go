@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"log"
 
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
@@ -18,8 +17,6 @@ func createIPv4Tun() (*water.Interface, error) {
 	}
 
 	ifaceName := ifce.Name()
-
-	log.Printf("Interface Name: %s\n", ifaceName)
 
 	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"net"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -10,6 +9,11 @@ import (
 
 func main() {
 	log.Printf("Starting GO-CLAT")
+
+	nat64Net, err := getNAT64Prefix()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	ipv6Addr, ipv6Iface, err := getIPv6Src()
 	if err != nil {
@@ -20,11 +24,6 @@ func main() {
 
 	if err != nil {
 		log.Fatal(err)
-	}
-
-	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
-	if err != nil {
-		log.Fatalf("Invalid NAT64 prefix: %v", err)
 	}
 
 	/**
@@ -62,14 +61,13 @@ func main() {
 	}()*/
 
 	// Define how to deal with incoming packets
+	log.Printf("Listening for incoming IPv4 packets on %s", iface.Name())
 	packet := make([]byte, 2000)
 	for {
 		n, err := iface.Read(packet)
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		log.Printf("Packet Received: % x\n", packet[:n])
 
 		// Parse the IPv4 packet
 		// Use gopacket to parse the IPv4 packet
@@ -78,7 +76,7 @@ func main() {
 
 		ipLayer := packet.Layer(layers.LayerTypeIPv4)
 		if ipLayer == nil {
-			log.Printf("Not an IPv4 packet")
+			// Not IPv4 packet, ignore because we are only translating IPv4 here
 			continue
 		}
 
@@ -87,18 +85,13 @@ func main() {
 		// https://datatracker.ietf.org/doc/html/rfc6145
 		// Safeguards
 
-		// Drop packet if origin is not actually our IP
-		if ip.SrcIP.String() != "192.0.0.1" {
-			log.Printf(
-				"Dropping packet with incorrect source IP %s, CLAT doesn't support translating this.",
-				ip.SrcIP.String(),
-			)
+		// Just ignore this packet, it's not a deliberate packet that we need to translate
+		if ip.SrcIP.IsUnspecified() {
 			continue
 		}
 
 		// If multicast, drop the packet
 		if ip.DstIP.IsMulticast() {
-			log.Printf("Dropping multicast packet")
 			continue
 		}
 
@@ -107,6 +100,14 @@ func main() {
 		if ip.Protocol == layers.IPProtocolICMPv4 &&
 			(ip.Flags&layers.IPv4MoreFragments != 0 || ip.FragOffset != 0) {
 			log.Printf("Dropping fragmented ICMP packet")
+			continue
+		}
+
+		// Drop packet if the packet is not a TCP, UDP or ICMP packet
+		if ip.Protocol != layers.IPProtocolTCP &&
+			ip.Protocol != layers.IPProtocolUDP &&
+			ip.Protocol != layers.IPProtocolICMPv4 {
+			log.Printf("Dropping packet with unsupported protocol %d", ip.Protocol)
 			continue
 		}
 
