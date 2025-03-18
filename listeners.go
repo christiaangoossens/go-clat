@@ -126,7 +126,7 @@ func listenIPv6UDP() {
 	}
 }
 
-func listenPCAP(iface string, address net.IP) {
+func listenPCAP(iface string, address net.IP, nat64Prefix *net.IPNet) {
 	// Open the device for capturing
 	handle, err := pcap.OpenLive(iface, 1600, true, pcap.BlockForever)
 	if err != nil {
@@ -134,7 +134,7 @@ func listenPCAP(iface string, address net.IP) {
 	}
 	defer handle.Close()
 
-	sourceNet := "64:ff9b::/96"
+	sourceNet := nat64Prefix.String()
 	destNet := address.String() + "/128"
 
 	// Filter to specific source & destinations (I'm only interested if this is the destination)

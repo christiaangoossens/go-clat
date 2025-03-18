@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -19,6 +20,11 @@ func main() {
 
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
+	if err != nil {
+		log.Fatalf("Invalid NAT64 prefix: %v", err)
 	}
 
 	/**
@@ -44,7 +50,7 @@ func main() {
 
 	// Listen for incoming packets with a certain origin (IPv6) and log them
 	go func() {
-		listenPCAP(ipv6Iface, ipv6Addr)
+		listenPCAP(ipv6Iface, ipv6Addr, nat64Net)
 	}()
 
 	/*go func() {
@@ -106,5 +112,23 @@ func main() {
 
 		log.Printf("IPv4 Packet: Src: %s, Dst: %s, Flags: %s, ID: %d, TTL: %d, Protocol: %s",
 			ip.SrcIP, ip.DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
+
+		// Get NAT64 translated destination from the ip.DstIP
+		// Map ip.DstIP onto the NAT64 prefix
+		// Parse the NAT64 prefix into an IPv6 address
+
+		// Map the IPv4 destination onto the NAT64 prefix
+		ipv4Bytes := ip.DstIP.To4()
+		if ipv4Bytes == nil {
+			log.Printf("Invalid IPv4 address: %s", ip.DstIP)
+			continue
+		}
+
+		nat64DstIP := nat64Net.IP
+		copy(nat64DstIP[12:], ipv4Bytes)
+
+		log.Printf("Translated IPv4 destination %s to NAT64 IPv6 destination %s",
+			ip.DstIP, nat64DstIP)
+
 	}
 }
