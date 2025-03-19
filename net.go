@@ -1,38 +1,20 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os/exec"
+
+	"github.com/songgao/water"
+	"github.com/vishvananda/netlink"
 )
 
-func getIPv6Src() (net.IP, string, error) {
-	// Get the IPv6 address from any interface that has a global IP
-
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, "", err
-	}
-
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			return nil, "", err
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if ok && ipNet.IP.To4() == nil && ipNet.IP.IsGlobalUnicast() {
-				return ipNet.IP, iface.Name, nil
-			}
-		}
-	}
-
-	return nil, "", fmt.Errorf("no global IPv6 address found")
+func isNetLinkAvailable() bool {
+	// Check if the netlink library can list links
+	_, err := netlink.LinkList()
+	return err == nil
 }
 
 func getNAT64PrefixFromDNS() (*net.IPNet, error) {
@@ -77,4 +59,184 @@ func getNAT64Prefix() (*net.IPNet, error) {
 	}
 
 	return nat64Prefix, nil
+}
+
+func createIPv4Tun(tunnelAddr net.IP) (*water.Interface, error) {
+	ifce, err := water.New(water.Config{
+		DeviceType: water.TUN,
+	})
+
+	if err != nil {
+		return nil, errors.New("Failed to create TUN interface: " + err.Error())
+	}
+
+	ifaceName := ifce.Name()
+
+	link, err := netlink.LinkByName(ifaceName)
+	if err != nil {
+		return nil, errors.New("Failed to get link: " + err.Error())
+	}
+
+	addr, err := netlink.ParseAddr(tunnelAddr.String() + "/32")
+	if err != nil {
+		return nil, errors.New("Failed to parse the static CLAT IPv4 address: " + err.Error())
+	}
+
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		return nil, errors.New("Failed to add the static CLAT IPv4 address: " + err.Error())
+	}
+
+	// Set MTU to 1260 (allow for 20-byte IPv4 header)
+	if err := netlink.LinkSetMTU(link, 1260); err != nil {
+		return nil, errors.New("Failed to set the MTU: " + err.Error())
+	}
+
+	// Disallow multicast
+	if err := netlink.LinkSetMulticastOff(link); err != nil {
+		return nil, errors.New("Failed to set multicast off: " + err.Error())
+	}
+
+	if err := netlink.LinkSetUp(link); err != nil {
+		return nil, errors.New("Failed to set the link state as up: " + err.Error())
+	}
+
+	// Add a default route
+	route := &netlink.Route{
+		Dst:       nil,
+		Gw:        tunnelAddr,
+		LinkIndex: link.Attrs().Index,
+	}
+	if err := netlink.RouteAdd(route); err != nil {
+		return nil, errors.New("Failed to add default route: " + err.Error())
+	}
+
+	return ifce, nil
+}
+
+func createIPv6Tun(tunnelAddr net.IP) (*water.Interface, error) {
+	ifce, err := water.New(water.Config{
+		DeviceType: water.TUN,
+	})
+
+	if err != nil {
+		return nil, errors.New("Failed to create TUN interface: " + err.Error())
+	}
+
+	ifaceName := ifce.Name()
+
+	link, err := netlink.LinkByName(ifaceName)
+	if err != nil {
+		return nil, errors.New("Failed to get link: " + err.Error())
+	}
+
+	addr, err := netlink.ParseAddr(tunnelAddr.String() + "/127")
+	if err != nil {
+		return nil, errors.New("Failed to parse the static CLAT IPv4 address: " + err.Error())
+	}
+
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		return nil, errors.New("Failed to add the static CLAT IPv6 address: " + err.Error())
+	}
+
+	// Disallow multicast
+	if err := netlink.LinkSetMulticastOff(link); err != nil {
+		return nil, errors.New("Failed to set multicast off: " + err.Error())
+	}
+
+	// Set MTU to 1280
+	if err := netlink.LinkSetMTU(link, 1280); err != nil {
+		return nil, errors.New("Failed to set the MTU: " + err.Error())
+	}
+
+	if err := netlink.LinkSetUp(link); err != nil {
+		return nil, errors.New("Failed to set the link state as up: " + err.Error())
+	}
+
+	return ifce, nil
+}
+
+// Register an IPv6 address on a given interface
+func addIPv6Address(iface *net.Interface, addr net.IP) error {
+	link, err := netlink.LinkByName(iface.Name)
+	if err != nil {
+		return errors.New("Failed to get link: " + err.Error())
+	}
+
+	ipNet := &net.IPNet{
+		IP:   addr,
+		Mask: net.CIDRMask(128, 128),
+	}
+
+	netlinkAddr := &netlink.Addr{
+		IPNet: ipNet,
+	}
+
+	if err := netlink.AddrAdd(link, netlinkAddr); err != nil {
+		return errors.New("Failed to add the IPv6 address: " + err.Error())
+	}
+
+	return nil
+}
+
+// Remove IPv6 address from a given interface
+func removeIPv6Address(iface *net.Interface, addr net.IP) error {
+	link, err := netlink.LinkByName(iface.Name)
+	if err != nil {
+		return errors.New("Failed to get link: " + err.Error())
+	}
+
+	ipNet := &net.IPNet{
+		IP:   addr,
+		Mask: net.CIDRMask(128, 128),
+	}
+
+	netlinkAddr := &netlink.Addr{
+		IPNet: ipNet,
+	}
+
+	if err := netlink.AddrDel(link, netlinkAddr); err != nil {
+		return errors.New("Failed to remove the IPv6 address: " + err.Error())
+	}
+
+	return nil
+}
+
+// Use ip6tables to add a DNAT rule that takes all packets that arrive on one IP and forwards them to another IP
+func addNAT66DNATMapping(ip1 net.IP, ip2 net.IP, iface *net.Interface) error {
+	// Add a DNAT rule to forward packets from ip1 to ip2
+	err := exec.Command(
+		"ip6tables",
+		"-t", "nat",
+		"-I", "PREROUTING",
+		"-i", iface.Name,
+		"-d", ip1.String(),
+		"-j", "DNAT",
+		"--to-destination", ip2.String(),
+	).Run()
+
+	if err != nil {
+		return errors.New("Failed to add the DNAT rule: " + err.Error())
+	}
+
+	return nil
+}
+
+// Remove the NAT64 mapping
+func removeNAT66DNATMapping(ip1 net.IP, ip2 net.IP, iface *net.Interface) error {
+	// Remove the DNAT rule
+	err := exec.Command(
+		"ip6tables",
+		"-t", "nat",
+		"-D", "PREROUTING",
+		"-i", iface.Name,
+		"-d", ip1.String(),
+		"-j", "DNAT",
+		"--to-destination", ip2.String(),
+	).Run()
+
+	if err != nil {
+		return errors.New("Failed to remove the DNAT rule: " + err.Error())
+	}
+
+	return nil
 }
