@@ -57,7 +57,7 @@ func app() int {
 	}
 
 	// Generate the IPv6 tunnel
-	tunnelIPv6NetIP, tunnelIPv6NetDNAT := getIPv6TunNet()
+	tunnelIPv6NetIP, tunnelIPv6NetSrcIP := getIPv6TunNet(ipAddr)
 	iface6, err6 := createIPv6Tun(tunnelIPv6NetIP)
 
 	if err6 != nil {
@@ -105,18 +105,18 @@ func app() int {
 		log.Printf("Removed extra IPv6 address")
 	}()
 
-	// Add a NAT mapping
-	err = addNAT66DNATMapping(publicIPv6Addr, tunnelIPv6NetDNAT, ipv6Iface)
+	// Perform the neccesary firewall settings
+	err = configureIptables(publicIPv6Addr, tunnelIPv6NetSrcIP, ipv6Iface.Name)
 	if err != nil {
 		log.Print(err)
 		return 1
 	}
 
 	defer func() {
-		if err := removeNAT66DNATMapping(publicIPv6Addr, tunnelIPv6NetDNAT, ipv6Iface); err != nil {
+		if err := deconfigureIptables(publicIPv6Addr, tunnelIPv6NetSrcIP, ipv6Iface.Name); err != nil {
 			log.Printf("Error removing IPv6 address: %v", err)
 		}
-		log.Printf("Removed IPv6 DNAT mapping")
+		log.Printf("Removed IPv6 iptables config for go-clat")
 	}()
 
 	/** ====
@@ -149,18 +149,31 @@ func app() int {
 			ip, _ := ipLayer.(*layers.IPv6)
 
 			// If dest is not the tunneladdr, drop it, we are only interested in return packets
-			if !ip.DstIP.Equal(tunnelIPv6NetDNAT) {
+			if !ip.DstIP.Equal(tunnelIPv6NetSrcIP) {
 				continue
 			}
 
 			// If the packet is not from the nat64 prefix, drop it
 			if !nat64Net.Contains(ip.SrcIP) {
-				log.Printf("Received random (non-translated) IPv6 Packet from Src: %s", ip.SrcIP)
 				continue
 			}
 
-			// Received a return packet, log it
-			log.Printf("IPv6 Packet: Src: %s, Dst: %s", ip.SrcIP, ip.DstIP)
+			// Recreate the IPv4 src address
+			ipv4SrcIP := ip.SrcIP[12:]
+
+			// Translate the packet to IPv4
+			result := translateIPv6(packet, ipv4SrcIP, ipAddr)
+
+			// Put the resulting packet back onto the IPv4 interface
+			if result == nil {
+				log.Printf("Dropping IPv6 packet, didn't translate")
+				continue
+			}
+
+			_, err = iface.Write(result)
+			if err != nil {
+				log.Printf("Error writing packet to IPv4 interface: %v", err)
+			}
 		}
 	}()
 
@@ -190,8 +203,8 @@ func app() int {
 			// https://datatracker.ietf.org/doc/html/rfc6145
 			// Safeguards
 
-			// Just ignore this packet, it's not a deliberate packet that we need to translate
-			if ip.SrcIP.IsUnspecified() {
+			// If src is wrong, drop the packet
+			if !ip.SrcIP.Equal(ipAddr) {
 				continue
 			}
 
@@ -216,9 +229,6 @@ func app() int {
 				continue
 			}
 
-			log.Printf("IPv4 Packet: Src: %s, Dst: %s, Flags: %s, ID: %d, TTL: %d, Protocol: %s",
-				ip.SrcIP, ip.DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
-
 			// Map the IPv4 destination onto the NAT64 prefix
 			ipv4Bytes := ip.DstIP.To4()
 			if ipv4Bytes == nil {
@@ -229,17 +239,19 @@ func app() int {
 			nat64DstIP := nat64Net.IP
 			copy(nat64DstIP[12:], ipv4Bytes)
 
+			log.Printf("Accepted incoming IPv4 Packet: Src: %s, Dst: %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
+				ip.SrcIP, ip.DstIP, nat64DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
+
 			// Translate the packet to IPv6
-			result := translateIPv4(packet, publicIPv6Addr, nat64DstIP)
+			result := translateIPv4(packet, tunnelIPv6NetSrcIP, nat64DstIP)
 
 			if result == nil {
 				// We shouldn't translate this packet
-				log.Printf("Dropping packet %d, didn't translate", ip.Id)
+				log.Printf("Dropping IPv4 packet %d, didn't translate", ip.Id)
 				continue
 			}
 
-			// Send out the translated packet with raw send socket
-			// Use raw socket to send the translated packet
+			// Open a raw socket for sending the translated packet
 			fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 			if err != nil {
 				log.Printf("Error creating raw socket: %v", err)
@@ -259,9 +271,7 @@ func app() int {
 
 			if err != nil {
 				log.Printf("Error sending translated packet for %d: %v", ip.Id, err)
-				continue
 			}
-
 		}
 	}()
 

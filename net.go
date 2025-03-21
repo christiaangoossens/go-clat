@@ -129,7 +129,7 @@ func createIPv6Tun(tunnelAddr net.IP) (*water.Interface, error) {
 		return nil, errors.New("Failed to get link: " + err.Error())
 	}
 
-	addr, err := netlink.ParseAddr(tunnelAddr.String() + "/127")
+	addr, err := netlink.ParseAddr(tunnelAddr.String() + "/64")
 	if err != nil {
 		return nil, errors.New("Failed to parse the static CLAT IPv4 address: " + err.Error())
 	}
@@ -201,41 +201,41 @@ func removeIPv6Address(iface *net.Interface, addr net.IP) error {
 	return nil
 }
 
-// Use ip6tables to add a DNAT rule that takes all packets that arrive on one IP and forwards them to another IP
-func addNAT66DNATMapping(ip1 net.IP, ip2 net.IP, iface *net.Interface) error {
+// Use ip6tables to add necessary rules
+func configureIptables(ip1 net.IP, ip2 net.IP, pubFace string) error {
 	// Add a DNAT rule to forward packets from ip1 to ip2
 	err := exec.Command(
 		"ip6tables",
 		"-t", "nat",
-		"-I", "PREROUTING",
-		"-i", iface.Name,
-		"-d", ip1.String(),
-		"-j", "DNAT",
-		"--to-destination", ip2.String(),
+		"-I", "POSTROUTING",
+		"-o", pubFace,
+		"-s", ip2.String(),
+		"-j", "SNAT",
+		"--to-source", ip1.String(),
 	).Run()
 
 	if err != nil {
-		return errors.New("Failed to add the DNAT rule: " + err.Error())
+		return errors.New("Failed to add the SNAT rule: " + err.Error())
 	}
 
 	return nil
 }
 
-// Remove the NAT64 mapping
-func removeNAT66DNATMapping(ip1 net.IP, ip2 net.IP, iface *net.Interface) error {
+// Remove the iptables config
+func deconfigureIptables(ip1 net.IP, ip2 net.IP, pubFace string) error {
 	// Remove the DNAT rule
 	err := exec.Command(
 		"ip6tables",
 		"-t", "nat",
-		"-D", "PREROUTING",
-		"-i", iface.Name,
-		"-d", ip1.String(),
-		"-j", "DNAT",
-		"--to-destination", ip2.String(),
+		"-D", "POSTROUTING",
+		"-o", pubFace,
+		"-s", ip2.String(),
+		"-j", "SNAT",
+		"--to-source", ip1.String(),
 	).Run()
 
 	if err != nil {
-		return errors.New("Failed to remove the DNAT rule: " + err.Error())
+		return errors.New("Failed to remove the SNAT rule: " + err.Error())
 	}
 
 	return nil

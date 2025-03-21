@@ -16,9 +16,19 @@ func getIPv4TunAddress() net.IP {
 }
 
 // Return the two addresses to be used for the tun net
-// TODO: Do these need to be dynamic? Can we use a better prefix?
-func getIPv6TunNet() (net.IP, net.IP) {
-	return net.ParseIP("fdb1:5394:aa52:6464:6464::"), net.ParseIP("fdb1:5394:aa52:6464:6464::1")
+func getIPv6TunNet(ipv4Addr net.IP) (net.IP, net.IP) {
+	// Make net from fdb1:5394:aa52:6464:6464::/64
+	ip, net, err := net.ParseCIDR("fdb1:5394:aa52:6464:6464::/64")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ip2, err := generateIPv6Address(ipv4Addr, net)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return ip, ip2
 }
 
 func getPublicIPv6() (*net.IPNet, *net.Interface, error) {
