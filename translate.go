@@ -68,7 +68,7 @@ func translateIPv4(packet gopacket.Packet, src net.IP, dest net.IP) []byte {
 func translateICMPv4(ip *layers.IPv6, payload []byte) []byte {
 	// Manually parsing ICMPv4
 	icmpv4Type := payload[0] // Type
-	// icmpv4Code := payload[1] // Code (not used in translation)
+	icmpv4Code := payload[1] // Code (not used in translation)
 	// Checksum is at bytes [2:4], generally skipped for just translating
 	identifier := (uint16(payload[4]) << 8) | uint16(payload[5])
 	sequence := (uint16(payload[6]) << 8) | uint16(payload[7])
@@ -82,6 +82,9 @@ func translateICMPv4(ip *layers.IPv6, payload []byte) []byte {
 		newType = 128
 	case 0:
 		newType = 129
+	case 3:
+		log.Printf("Generated error on our local side to transmit back: type %d, code %d, identifier %d, sequence %d", icmpv4Type, icmpv4Code, identifier, sequence)
+		return nil
 	default:
 		log.Printf("Dropping ICMPv4 packet with unsupported type %d", icmpv4Type)
 		return nil
@@ -138,11 +141,6 @@ func translateUDPv4(ip *layers.IPv6, payload []byte) []byte {
 }
 
 func translateIPv6(packet gopacket.Packet, dest net.IP, nat64Net *net.IPNet, reversed bool) []byte {
-	/*if !reversed {
-		// Recieved IPv6 packet
-		log.Printf("Recieved IPv6 packet to translate %x", packet.Data())
-	}*/
-
 	// Translate an IPv6 packet to an IPv4 packet
 	ipLayer := packet.Layer(layers.LayerTypeIPv6)
 	if ipLayer == nil {
@@ -173,9 +171,9 @@ func translateIPv6(packet gopacket.Packet, dest net.IP, nat64Net *net.IPNet, rev
 		IHL:        5,
 		TOS:        ip.TrafficClass,
 		Length:     0, // Automatically calculated during serialization
-		Id:         0, // ID can be set if needed for fragmentation; 0 for simple cases
-		Flags:      0,
-		FragOffset: 0,
+		Id:         0, // Overwritten for fragments
+		Flags:      0, // Overwritten for fragments
+		FragOffset: 0, // Overwritten for fragments
 		TTL:        ip.HopLimit - 1,
 		Protocol:   protocol,
 		SrcIP:      src,
@@ -191,7 +189,27 @@ func translateIPv6(packet gopacket.Packet, dest net.IP, nat64Net *net.IPNet, rev
 		payload = translateTCPv6(ipv4, ip.Payload)
 	case layers.IPProtocolUDP:
 		payload = translateUDPv6(ipv4, ip.Payload)
+	case layers.IPProtocolIPv6Fragment:
+		fragmentLayer := packet.Layer(layers.LayerTypeIPv6Fragment)
+		if fragmentLayer == nil {
+			// Invalid packet, drop
+			log.Printf("Dropping invalid fragmented IPv6 packet without any actual fragment in it")
+			return nil
+		}
+
+		fragment, _ := fragmentLayer.(*layers.IPv6Fragment)
+
+		ipv4.FragOffset = fragment.FragmentOffset
+		ipv4.Id = uint16(fragment.Identification)
+
+		if fragment.MoreFragments {
+			ipv4.Flags = 1 << 0 // MF flag
+		}
+
+		ipv4.Protocol = fragment.NextHeader
+		payload = fragment.Payload
 	default:
+		log.Printf("Unknown protocol %s found in IPv6 packet", protocol)
 		return nil
 	}
 
