@@ -150,25 +150,27 @@ func app() int {
 
 			// If dest is not the tunneladdr, drop it, we are only interested in return packets
 			if !ip.DstIP.Equal(tunnelIPv6NetSrcIP) {
+				log.Printf("Dropping packet with wrong destination %s", ip.DstIP)
 				continue
 			}
 
 			// If the packet is not from the nat64 prefix, drop it
-			if !nat64Net.Contains(ip.SrcIP) {
+			if !nat64Net.Contains(ip.SrcIP) && ip.NextLayerType() != layers.LayerTypeICMPv6 {
+				log.Printf("Dropping non-ICMP packet with wrong source %s", ip.SrcIP)
 				continue
 			}
 
-			// Recreate the IPv4 src address
-			ipv4SrcIP := ip.SrcIP[12:]
-
 			// Translate the packet to IPv4
-			result := translateIPv6(packet, ipv4SrcIP, ipAddr)
+			result := translateIPv6(packet, ipAddr, false)
 
 			// Put the resulting packet back onto the IPv4 interface
 			if result == nil {
 				log.Printf("Dropping IPv6 packet, didn't translate")
 				continue
 			}
+
+			// Log the result packet
+			//log.Printf("Translated IPv6 packet to %x", result)
 
 			_, err = iface.Write(result)
 			if err != nil {
