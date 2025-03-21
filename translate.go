@@ -63,27 +63,24 @@ func translateIPv4(packet gopacket.Packet, src net.IP, dest net.IP) []byte {
 }
 
 func translateICMPv4(ip *layers.IPv6, payload []byte) []byte {
-	// Parse the ICMP packet to get the type
-	packet := gopacket.NewPacket(payload, layers.LayerTypeICMPv4, gopacket.Default)
-	icmpLayer := packet.Layer(layers.LayerTypeICMPv4)
-	if icmpLayer == nil {
-		log.Println("Not an ICMPv4 packet")
-		return nil
-	}
+	// Manually parsing ICMPv4
+	icmpv4Type := payload[0] // Type
+	// icmpv4Code := payload[1] // Code (not used in translation)
+	// Checksum is at bytes [2:4], generally skipped for just translating
+	identifier := (uint16(payload[4]) << 8) | uint16(payload[5])
+	sequence := (uint16(payload[6]) << 8) | uint16(payload[7])
 
-	icmp, _ := icmpLayer.(*layers.ICMPv4)
-
-	// Extract the payload from the ICMPv4 packet
-	icmpv4Payload := icmpLayer.LayerPayload()
+	// Extract payload data after ICMPv4 header
+	icmpv4Payload := payload[8:]
 
 	var newType uint8
-	switch icmp.TypeCode.Type() {
+	switch icmpv4Type {
 	case 8:
 		newType = 128
 	case 0:
 		newType = 129
 	default:
-		log.Printf("Dropping ICMPv4 packet with unsupported type %d", icmp.TypeCode.Type())
+		log.Printf("Dropping ICMPv4 packet with unsupported type %d", icmpv4Type)
 		return nil
 	}
 
@@ -95,8 +92,8 @@ func translateICMPv4(ip *layers.IPv6, payload []byte) []byte {
 	// Set the actual id & seq
 	// Create ICMPv6 Echo Message
 	echoLayer := &layers.ICMPv6Echo{
-		Identifier: icmp.Id,
-		SeqNumber:  icmp.Seq,
+		Identifier: identifier,
+		SeqNumber:  sequence,
 	}
 
 	// Use the pseudoheader to calculate the checksum

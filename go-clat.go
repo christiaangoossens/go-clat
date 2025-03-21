@@ -239,8 +239,8 @@ func app() int {
 			nat64DstIP := nat64Net.IP
 			copy(nat64DstIP[12:], ipv4Bytes)
 
-			log.Printf("Accepted incoming IPv4 Packet: Src: %s, Dst: %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
-				ip.SrcIP, ip.DstIP, nat64DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
+			log.Printf("Translating IPv4 packet to %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
+				ip.DstIP, nat64DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
 
 			// Translate the packet to IPv6
 			result := translateIPv4(packet, tunnelIPv6NetSrcIP, nat64DstIP)
