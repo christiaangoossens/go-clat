@@ -15,6 +15,10 @@ func getIPv4TunAddress() net.IP {
 	return net.IPv4(192, 0, 0, 1)
 }
 
+func getIPv4RouterAddress() net.IP {
+	return net.IPv4(192, 0, 0, 254)
+}
+
 // Return the two addresses to be used for the tun net
 func getIPv6TunNet(ipv4Addr net.IP) (net.IP, net.IP) {
 	// Make net from fdb1:5394:aa52:6464:6464::/64

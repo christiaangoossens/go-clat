@@ -1,4 +1,3 @@
-// https://github.com/ddrown/android_external_android-clat/blob/master/translate.c
 package main
 
 import (
@@ -55,6 +54,10 @@ func translateIPv4(packet gopacket.Packet, src net.IP, dest net.IP) []byte {
 	switch protocol {
 	case layers.IPProtocolICMPv6:
 		payload = translateICMPv4(ipv6, ip.Payload)
+	case layers.IPProtocolTCP:
+		payload = translateTCPv4(ipv6, ip.Payload)
+	case layers.IPProtocolUDP:
+		payload = translateUDPv4(ipv6, ip.Payload)
 	default:
 		return nil
 	}
@@ -106,7 +109,35 @@ func translateICMPv4(ip *layers.IPv6, payload []byte) []byte {
 	return serializePacket(icmpv6, echoLayer, gopacket.Payload(icmpv4Payload))
 }
 
-func translateIPv6(packet gopacket.Packet, dest net.IP, reversed bool) []byte {
+func translateTCPv4(ip *layers.IPv6, payload []byte) []byte {
+	// Parse TCP packet
+	tcpLayer := gopacket.NewPacket(payload, layers.LayerTypeTCP, gopacket.Default)
+	tcp, _ := tcpLayer.Layer(layers.LayerTypeTCP).(*layers.TCP)
+
+	err := tcp.SetNetworkLayerForChecksum(ip)
+	if err != nil {
+		log.Printf("Failed to set network layer for TCPv6 checksum: %v", err)
+		return nil
+	}
+
+	return serializePacket(tcp, gopacket.Payload(tcp.Payload))
+}
+
+func translateUDPv4(ip *layers.IPv6, payload []byte) []byte {
+	// Parse UDP packet
+	udpLayer := gopacket.NewPacket(payload, layers.LayerTypeUDP, gopacket.Default)
+	udp, _ := udpLayer.Layer(layers.LayerTypeUDP).(*layers.UDP)
+
+	err := udp.SetNetworkLayerForChecksum(ip)
+	if err != nil {
+		log.Printf("Failed to set network layer for UDPv6 checksum: %v", err)
+		return nil
+	}
+
+	return serializePacket(udp, gopacket.Payload(udp.Payload))
+}
+
+func translateIPv6(packet gopacket.Packet, dest net.IP, nat64Net *net.IPNet, reversed bool) []byte {
 	/*if !reversed {
 		// Recieved IPv6 packet
 		log.Printf("Recieved IPv6 packet to translate %x", packet.Data())
@@ -130,8 +161,10 @@ func translateIPv6(packet gopacket.Packet, dest net.IP, reversed bool) []byte {
 	if reversed {
 		src = dest
 		dest = ip.DstIP[12:]
-	} else {
+	} else if nat64Net.Contains(ip.SrcIP) {
 		src = ip.SrcIP[12:]
+	} else {
+		src = getIPv4RouterAddress()
 	}
 
 	// Create a new IPv4 packet that matches the IPv6 Packet without any payload
@@ -150,26 +183,22 @@ func translateIPv6(packet gopacket.Packet, dest net.IP, reversed bool) []byte {
 	}
 
 	var payload []byte
-	isErrorPkt := false
 
 	switch protocol {
 	case layers.IPProtocolICMPv4:
-		isErrorPkt, payload = translateICMPv6(ip.Payload)
+		payload = translateICMPv6(dest, nat64Net, ip.Payload)
+	case layers.IPProtocolTCP:
+		payload = translateTCPv6(ipv4, ip.Payload)
+	case layers.IPProtocolUDP:
+		payload = translateUDPv6(ipv4, ip.Payload)
 	default:
 		return nil
-	}
-
-	if isErrorPkt {
-		ipv4.SrcIP = net.IPv4(192, 0, 0, 2)
-		innerPacket := gopacket.NewPacket(ip.Payload[8:], layers.LayerTypeIPv6, gopacket.Default)
-		innerPacketPayload := translateIPv6(innerPacket, dest, true)
-		return serializePacket(ipv4, gopacket.Payload(payload), gopacket.Payload(innerPacketPayload))
 	}
 
 	return serializePacket(ipv4, gopacket.Payload(payload))
 }
 
-func translateICMPv6(payload []byte) (bool, []byte) {
+func translateICMPv6(dest net.IP, nat64Net *net.IPNet, payload []byte) []byte {
 	// Parse the ICMP packet to get the type
 	// Read ICMPv6 header fields
 	icmpv6Type := payload[0]
@@ -177,16 +206,47 @@ func translateICMPv6(payload []byte) (bool, []byte) {
 
 	switch icmpv6Type {
 	case 128:
-		return false, translateICMPv6Echo(8, payload)
+		return translateICMPv6Echo(8, payload)
 	case 129:
-		return false, translateICMPv6Echo(0, payload)
+		return translateICMPv6Echo(0, payload)
 	case 1:
 		// Destination Unreachable
-		return true, generateICMPv6DestUnreachError(code)
+		return generateICMPv6DestUnreachError(code, dest, nat64Net, payload)
+	case 3:
+		// Time Exceeded
+		return generateICMPv6Error(11, code, dest, nat64Net, payload)
 	default:
 		log.Printf("Dropping ICMPv6 packet with unsupported type %d", icmpv6Type)
-		return false, nil
+		return nil
 	}
+}
+
+func translateTCPv6(ip *layers.IPv4, payload []byte) []byte {
+	// Parse TCP packet
+	tcpLayer := gopacket.NewPacket(payload, layers.LayerTypeTCP, gopacket.Default)
+	tcp, _ := tcpLayer.Layer(layers.LayerTypeTCP).(*layers.TCP)
+
+	err := tcp.SetNetworkLayerForChecksum(ip)
+	if err != nil {
+		log.Printf("Failed to set network layer for TCPv4 checksum: %v", err)
+		return nil
+	}
+
+	return serializePacket(tcp, gopacket.Payload(tcp.Payload))
+}
+
+func translateUDPv6(ip *layers.IPv4, payload []byte) []byte {
+	// Parse UDP packet
+	udpLayer := gopacket.NewPacket(payload, layers.LayerTypeUDP, gopacket.Default)
+	udp, _ := udpLayer.Layer(layers.LayerTypeUDP).(*layers.UDP)
+
+	err := udp.SetNetworkLayerForChecksum(ip)
+	if err != nil {
+		log.Printf("Failed to set network layer for UDPv4 checksum: %v", err)
+		return nil
+	}
+
+	return serializePacket(udp, gopacket.Payload(udp.Payload))
 }
 
 func translateICMPv6Echo(newType byte, payload []byte) []byte {
@@ -204,7 +264,7 @@ func translateICMPv6Echo(newType byte, payload []byte) []byte {
 	return serializePacket(icmpv4, gopacket.Payload(icmpv6Payload))
 }
 
-func generateICMPv6DestUnreachError(code byte) []byte {
+func generateICMPv6DestUnreachError(code byte, dest net.IP, nat64Net *net.IPNet, payload []byte) []byte {
 	var newCode byte
 
 	switch code {
@@ -233,5 +293,47 @@ func generateICMPv6DestUnreachError(code byte) []byte {
 		TypeCode: layers.CreateICMPv4TypeCode(3, newCode),
 	}
 
-	return serializePacket(icmpv4)
+	return serializePacket(icmpv4, gopacket.Payload(generateICMPv6ErrorData(dest, nat64Net, payload)))
+}
+
+func generateICMPv6Error(typeNr byte, code byte, dest net.IP, nat64Net *net.IPNet, payload []byte) []byte {
+	// Create new IPv4 ICMP packet
+	icmpv4 := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(typeNr, code),
+	}
+
+	return serializePacket(icmpv4, gopacket.Payload(generateICMPv6ErrorData(dest, nat64Net, payload)))
+}
+
+func generateICMPv6ErrorData(dest net.IP, nat64Net *net.IPNet, payload []byte) []byte {
+	innerPacket := gopacket.NewPacket(payload[8:], layers.LayerTypeIPv6, gopacket.Default)
+	innerPacketPayload := translateIPv6(innerPacket, dest, nat64Net, true)
+
+	// ICMPv4 error packets cannot exceed 576 bytes
+	maxlength := 576 - 20 - 8
+
+	return innerPacketPayload[:min(len(innerPacketPayload), maxlength)]
+}
+
+func generateICMPv4FullTTLExceeded(originalPacket []byte) []byte {
+	ipv4 := &layers.IPv4{
+		Version:    4,
+		IHL:        5,
+		TOS:        0,
+		Length:     0, // Automatically calculated during serialization
+		Id:         0, // ID can be set if needed for fragmentation; 0 for simple cases
+		Flags:      0,
+		FragOffset: 0,
+		TTL:        1,
+		Protocol:   layers.IPProtocolICMPv4,
+		SrcIP:      getIPv4RouterAddress(),
+		DstIP:      getIPv4TunAddress(),
+	}
+
+	icmpv4 := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(11, 0),
+	}
+
+	// 28 bytes of the original packets, 20 bytes for IPv4, 8 bytes of the datagram
+	return serializePacket(ipv4, icmpv4, gopacket.Payload(originalPacket[:min(len(originalPacket), 28)]))
 }

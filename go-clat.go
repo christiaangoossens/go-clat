@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -150,7 +151,6 @@ func app() int {
 
 			// If dest is not the tunneladdr, drop it, we are only interested in return packets
 			if !ip.DstIP.Equal(tunnelIPv6NetSrcIP) {
-				log.Printf("Dropping packet with wrong destination %s", ip.DstIP)
 				continue
 			}
 
@@ -161,11 +161,12 @@ func app() int {
 			}
 
 			// Translate the packet to IPv4
-			result := translateIPv6(packet, ipAddr, false)
+			result := translateIPv6(packet, ipAddr, nat64Net, false)
 
 			// Put the resulting packet back onto the IPv4 interface
 			if result == nil {
-				log.Printf("Dropping IPv6 packet, didn't translate")
+				log.Printf("Dropping incoming IPv6 packet to %s (%s), Next Layer: %s",
+					ip.DstIP, ipAddr, ip.NextLayerType())
 				continue
 			}
 
@@ -210,8 +211,8 @@ func app() int {
 				continue
 			}
 
-			// If multicast, drop the packet
-			if ip.DstIP.IsMulticast() {
+			// If multicast, local or otherwise malformed, drop the packet
+			if ip.DstIP.IsMulticast() || ip.DstIP.IsLinkLocalUnicast() || ip.DstIP.IsLinkLocalMulticast() {
 				continue
 			}
 
@@ -231,6 +232,17 @@ func app() int {
 				continue
 			}
 
+			if int(ip.TTL) < 3 {
+				// Return immediately with an error
+				result := generateICMPv4FullTTLExceeded(packetData)
+				_, err = iface.Write(result)
+				if err != nil {
+					log.Printf("Error writing packet to IPv4 interface: %v", err)
+				}
+
+				continue
+			}
+
 			// Map the IPv4 destination onto the NAT64 prefix
 			ipv4Bytes := ip.DstIP.To4()
 			if ipv4Bytes == nil {
@@ -241,39 +253,19 @@ func app() int {
 			nat64DstIP := nat64Net.IP
 			copy(nat64DstIP[12:], ipv4Bytes)
 
-			log.Printf("Translating IPv4 packet to %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
-				ip.DstIP, nat64DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
-
 			// Translate the packet to IPv6
 			result := translateIPv4(packet, tunnelIPv6NetSrcIP, nat64DstIP)
 
 			if result == nil {
 				// We shouldn't translate this packet
-				log.Printf("Dropping IPv4 packet %d, didn't translate", ip.Id)
+				log.Printf("Dropping IPv4 packet to %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
+					ip.DstIP, nat64DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
 				continue
 			}
 
-			// Open a raw socket for sending the translated packet
-			fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
-			if err != nil {
-				log.Printf("Error creating raw socket: %v", err)
-				continue
-			}
-
-			// Destination address for the packet
-			addr := &syscall.SockaddrInet6{
-				Port: 0,
-				Addr: [16]byte{},
-			}
-			copy(addr.Addr[:], nat64DstIP)
-
-			// Send the packet
-			err = syscall.Sendto(fd, result, 0, addr)
-			syscall.Close(fd)
-
-			if err != nil {
-				log.Printf("Error sending translated packet for %d: %v", ip.Id, err)
-			}
+			// Log the result packet
+			//log.Printf("Translated IPv4 packet to %x", result)
+			sendPacket(result, nat64DstIP, ip.Id)
 		}
 	}()
 
@@ -283,6 +275,30 @@ func app() int {
 	<-gracefulShutdown
 	log.Println("Got a shutdown request, exiting gracefully...")
 	return 0
+}
+
+func sendPacket(packet []byte, dstIP net.IP, id uint16) {
+	// Open a raw socket for sending the translated packet
+	fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+	if err != nil {
+		log.Printf("Error creating raw socket: %v", err)
+		return
+	}
+
+	// Destination address for the packet
+	addr := &syscall.SockaddrInet6{
+		Port: 0,
+		Addr: [16]byte{},
+	}
+	copy(addr.Addr[:], dstIP)
+
+	// Send the packet
+	err = syscall.Sendto(fd, packet, 0, addr)
+	syscall.Close(fd)
+
+	if err != nil {
+		log.Printf("Error sending translated packet for %d: %v", id, err)
+	}
 }
 
 func main() {
