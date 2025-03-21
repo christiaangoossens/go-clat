@@ -7,8 +7,9 @@ Note: This project is currently Linux only!
 
 ## Test Instructions
 1. Ensure that your network and DNS allow for NAT64. If they don't, or if you are testing on a network with IPv4 enabled, disable IPv4 first and then use `2a02:898:146:64::64` for a public example DNS64 server.
-2. Check that `ping 1.1.1.1` does not work for you.
-3. Install golang (prebuilt binaries will be available later)
-4. Build the program using `go build`
-5. Run the program using root (for instance sudo) with `sudo ./go-clat`.
-6. You should now be able to use `ping 1.1.1.1` to test.
+2. Check that `ping 1.1.1.1` does NOT work for you (you should see `ping: connect: Network is unreachable`)
+3. Go to the last commit of this repository and go to the Github Action
+4. A prebuilt binary should be available there in the artifacts
+5. Download this binary to your working directory
+6. Run the binary using root (for instance sudo) with `sudo ./go-clat`.
+7. You should now be able to use `ping 1.1.1.1` to test.
