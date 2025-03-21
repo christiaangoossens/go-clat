@@ -219,10 +219,6 @@ func app() int {
 			log.Printf("IPv4 Packet: Src: %s, Dst: %s, Flags: %s, ID: %d, TTL: %d, Protocol: %s",
 				ip.SrcIP, ip.DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
 
-			// Get NAT64 translated destination from the ip.DstIP
-			// Map ip.DstIP onto the NAT64 prefix
-			// Parse the NAT64 prefix into an IPv6 address
-
 			// Map the IPv4 destination onto the NAT64 prefix
 			ipv4Bytes := ip.DstIP.To4()
 			if ipv4Bytes == nil {
@@ -233,8 +229,38 @@ func app() int {
 			nat64DstIP := nat64Net.IP
 			copy(nat64DstIP[12:], ipv4Bytes)
 
-			log.Printf("Translated IPv4 destination %s to NAT64 IPv6 destination %s",
-				ip.DstIP, nat64DstIP)
+			// Translate the packet to IPv6
+			result := translateIPv4(packet, publicIPv6Addr, nat64DstIP)
+
+			if result == nil {
+				// We shouldn't translate this packet
+				log.Printf("Dropping packet %d, didn't translate", ip.Id)
+				continue
+			}
+
+			// Send out the translated packet with raw send socket
+			// Use raw socket to send the translated packet
+			fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+			if err != nil {
+				log.Printf("Error creating raw socket: %v", err)
+				continue
+			}
+
+			// Destination address for the packet
+			addr := &syscall.SockaddrInet6{
+				Port: 0,
+				Addr: [16]byte{},
+			}
+			copy(addr.Addr[:], nat64DstIP)
+
+			// Send the packet
+			err = syscall.Sendto(fd, result, 0, addr)
+			syscall.Close(fd)
+
+			if err != nil {
+				log.Printf("Error sending translated packet for %d: %v", ip.Id, err)
+				continue
+			}
 
 		}
 	}()

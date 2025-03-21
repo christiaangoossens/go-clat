@@ -1,1 +1,0 @@
-https://github.com/ddrown/android_external_android-clat/blob/master/translate.c
