@@ -1,12 +1,14 @@
 # Golang based CLAT translator (go-clat)
-_Do not use in production settings! This is an academic project._
+> [!NOTE]  
+> _This is an academic project. Use in production at your own risk._
 
 > [!NOTE]  
 > ICMP, TCP and UDP work with this translator, but the implementation is incomplete. If you would be interested in implementing the remaining ICMP types from the RFC, please submit a PR or wait for me to implement them one day ;)
 
-Allows the use of IPv4 literals on an IPv6 (NAT64 + DNS64) only network without any manual configuration. It will autodiscover the prefix using `ipv4only.arpa` and configure your machine to work automatically.
+> [!NOTE]  
+> This project is theoretically cross-platform, but currently Linux only.
 
-Note: This project is currently Linux only!
+Allows the use of IPv4 literals on an IPv6 (NAT64 + DNS64) only network without any manual configuration. It will autodiscover the prefix using `ipv4only.arpa` and configure your machine to work automatically.
 
 ## Test Instructions
 1. Ensure that your network and DNS allow for NAT64. If they don't, or if you are testing on a network with IPv4 enabled, disable IPv4 first and then use `2a02:898:146:64::64` for a public example DNS64 server.
