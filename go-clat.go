@@ -123,7 +123,7 @@ func app() int {
 	}()
 
 	// Create translator
-	translator, err := siit.NewTranslator(nat64Net, ipAddr)
+	translator, err := siit.NewTranslator(nat64Net, getIPv4RouterAddress())
 	if err != nil {
 		log.Printf("Error creating translator: %v", err)
 		return 1
