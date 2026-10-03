@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+
+	"github.com/christiaangoossens/go-siit"
 )
 
 func app() int {
@@ -120,6 +122,13 @@ func app() int {
 		log.Printf("Removed IPv6 iptables config for go-clat")
 	}()
 
+	// Create translator
+	translator, err := siit.NewTranslator(nat64Net, ipAddr)
+	if err != nil {
+		log.Printf("Error creating translator: %v", err)
+		return 1
+	}
+
 	/** ====
 	 * SETUP DONE!
 	 * =====
@@ -161,7 +170,13 @@ func app() int {
 			}
 
 			// Translate the packet to IPv4
-			result := translateIPv6(packet, ipAddr, nat64Net, false)
+			result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{
+				DestinationIP: ipAddr,
+			})
+			if err != nil {
+				log.Printf("Error translating IPv6 packet: %v", err)
+				continue
+			}
 
 			// Put the resulting packet back onto the IPv4 interface
 			if result == nil {
@@ -211,38 +226,6 @@ func app() int {
 				continue
 			}
 
-			// If multicast, local or otherwise malformed, drop the packet
-			if ip.DstIP.IsMulticast() || ip.DstIP.IsLinkLocalUnicast() || ip.DstIP.IsLinkLocalMulticast() {
-				continue
-			}
-
-			// If the packet is fragmented ICMP, drop it
-			// Source: Fragmented ICMP/ICMPv6 packets will not be translated by the IP/ICMP translator.
-			if ip.Protocol == layers.IPProtocolICMPv4 &&
-				(ip.Flags&layers.IPv4MoreFragments != 0 || ip.FragOffset != 0) {
-				log.Printf("Dropping fragmented ICMP packet")
-				continue
-			}
-
-			// Drop packet if the packet is not a TCP, UDP or ICMP packet
-			if ip.Protocol != layers.IPProtocolTCP &&
-				ip.Protocol != layers.IPProtocolUDP &&
-				ip.Protocol != layers.IPProtocolICMPv4 {
-				log.Printf("Dropping packet with unsupported protocol %d", ip.Protocol)
-				continue
-			}
-
-			if int(ip.TTL) < 3 {
-				// Return immediately with an error
-				result := generateICMPv4FullTTLExceeded(packetData)
-				_, err = iface.Write(result)
-				if err != nil {
-					log.Printf("Error writing packet to IPv4 interface: %v", err)
-				}
-
-				continue
-			}
-
 			// Map the IPv4 destination onto the NAT64 prefix
 			ipv4Bytes := ip.DstIP.To4()
 			if ipv4Bytes == nil {
@@ -254,12 +237,20 @@ func app() int {
 			copy(nat64DstIP[12:], ipv4Bytes)
 
 			// Translate the packet to IPv6
-			result := translateIPv4(packet, tunnelIPv6NetSrcIP, nat64DstIP)
+			result, err := translator.TranslateIPv4(packet, siit.TranslationOverrides{
+				SourceIP:      tunnelIPv6NetSrcIP,
+				DestinationIP: nat64DstIP,
+			})
 
 			if result == nil {
 				// We shouldn't translate this packet
 				log.Printf("Dropping IPv4 packet to %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
 					ip.DstIP, nat64DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
+				continue
+			}
+
+			if err != nil {
+				log.Printf("Error translating IPv4 packet: %v", err)
 				continue
 			}
 

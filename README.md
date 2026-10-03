@@ -2,9 +2,6 @@
 > [!WARNING]  
 > This is an academic project. Use in production at your own risk. It is also currently Linux only.
 
-> [!NOTE]  
-> ICMP, TCP and UDP work with this translator, but the implementation is incomplete. If you would be interested in implementing the remaining ICMP types from the RFC, see https://github.com/christiaangoossens/go-clat/issues/1.
-
 Allows the use of IPv4 literals on an IPv6 (NAT64 + DNS64) only network without any manual configuration. It will autodiscover the prefix using `ipv4only.arpa` and configure your machine to work automatically.
 
 ## Test Instructions
