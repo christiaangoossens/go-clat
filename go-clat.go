@@ -38,8 +38,8 @@ func app() int {
 	}
 
 	// Generate the IPv4 tunnel
-	ipAddr := getIPv4TunAddress()
-	iface, err := createIPv4Tun(ipAddr)
+	ipv4TunnelAddr := getIPv4TunAddress()
+	iface, err := createIPv4Tun(ipv4TunnelAddr)
 
 	if err != nil {
 		log.Print(err)
@@ -53,14 +53,14 @@ func app() int {
 		return 1
 	}
 
-	publicIPv6Addr, err := generateIPv6Address(ipAddr, ipv6Prefix)
+	publicIPv6Addr, err := generateIPv6Address(ipv4TunnelAddr, ipv6Prefix)
 	if err != nil {
 		log.Print(err)
 		return 1
 	}
 
 	// Generate the IPv6 tunnel
-	tunnelIPv6NetIP, tunnelIPv6NetSrcIP := getIPv6TunNet(ipAddr)
+	tunnelIPv6NetIP, tunnelIPv6NetSrcIP := getIPv6TunNet(ipv4TunnelAddr)
 	iface6, err6 := createIPv6Tun(tunnelIPv6NetIP)
 
 	if err6 != nil {
@@ -123,7 +123,12 @@ func app() int {
 	}()
 
 	// Create translator
-	translator, err := siit.NewTranslator(nat64Net, getIPv4RouterAddress())
+	translator, err := siit.NewTranslator(nat64Net, getIPv4RouterAddress(), siit.RawEAMTable{
+		{
+			IPv4Prefix: ipv4TunnelAddr.String(),
+			IPv6Prefix: tunnelIPv6NetSrcIP.String(),
+		},
+	})
 	if err != nil {
 		log.Printf("Error creating translator: %v", err)
 		return 1
@@ -170,25 +175,23 @@ func app() int {
 			}
 
 			// Translate the packet to IPv4
-			result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{
-				DestinationIP: ipAddr,
-			})
+			result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			if err != nil {
 				log.Printf("Error translating IPv6 packet: %v", err)
 				continue
 			}
 
 			// Put the resulting packet back onto the IPv4 interface
-			if result == nil {
+			if result.Packet == nil {
 				log.Printf("Dropping incoming IPv6 packet to %s (%s), Next Layer: %s",
-					ip.DstIP, ipAddr, ip.NextLayerType())
+					ip.DstIP, result.DstIP, ip.NextLayerType())
 				continue
 			}
 
 			// Log the result packet
 			//log.Printf("Translated IPv6 packet to %x", result)
 
-			_, err = iface.Write(result)
+			_, err = iface.Write(result.Packet)
 			if err != nil {
 				log.Printf("Error writing packet to IPv4 interface: %v", err)
 			}
@@ -222,30 +225,17 @@ func app() int {
 			// Safeguards
 
 			// If src is wrong, drop the packet
-			if !ip.SrcIP.Equal(ipAddr) {
+			if !ip.SrcIP.Equal(ipv4TunnelAddr) {
 				continue
 			}
-
-			// Map the IPv4 destination onto the NAT64 prefix
-			ipv4Bytes := ip.DstIP.To4()
-			if ipv4Bytes == nil {
-				log.Printf("Invalid IPv4 address: %s", ip.DstIP)
-				continue
-			}
-
-			nat64DstIP := nat64Net.IP
-			copy(nat64DstIP[12:], ipv4Bytes)
 
 			// Translate the packet to IPv6
-			result, err := translator.TranslateIPv4(packet, siit.TranslationOverrides{
-				SourceIP:      tunnelIPv6NetSrcIP,
-				DestinationIP: nat64DstIP,
-			})
+			result, err := translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 
-			if result == nil {
+			if result.Packet == nil {
 				// We shouldn't translate this packet
 				log.Printf("Dropping IPv4 packet to %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
-					ip.DstIP, nat64DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
+					ip.DstIP, result.DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
 				continue
 			}
 
@@ -256,7 +246,7 @@ func app() int {
 
 			// Log the result packet
 			//log.Printf("Translated IPv4 packet to %x", result)
-			sendPacket(result, nat64DstIP, ip.Id)
+			sendPacket(result.Packet, result.DstIP, ip.Id)
 		}
 	}()
 
