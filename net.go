@@ -86,8 +86,8 @@ func createIPv4Tun(tunnelAddr net.IP) (*water.Interface, error) {
 		return nil, errors.New("Failed to add the static CLAT IPv4 address: " + err.Error())
 	}
 
-	// Set MTU to 1260 (allow for 20-byte IPv4 header)
-	if err := netlink.LinkSetMTU(link, 1260); err != nil {
+	// Set MTU to 1252 (allow for 20-byte IPv4 header and IPv6 fragment header)
+	if err := netlink.LinkSetMTU(link, 1252); err != nil {
 		return nil, errors.New("Failed to set the MTU: " + err.Error())
 	}
 
