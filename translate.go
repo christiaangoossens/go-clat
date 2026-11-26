@@ -45,7 +45,7 @@ func translateIPv4Loop(translator *siit.Translator, ipv4Tun io.ReadWriter, forwa
 		}
 
 		packet := siit.Packet(buffer[:n])
-		if packet.Version() != 4 || packet.Src() != hostAddr {
+		if packet.Src() != hostAddr {
 			continue
 		}
 
@@ -67,7 +67,7 @@ func translateIPv6Loop(translator *siit.Translator, ipv6Tun io.ReadWriter, ipv4T
 		}
 
 		packet := siit.Packet(buffer[:n])
-		if packet.Version() != 6 || packet.Dst() != tunnelAddr {
+		if packet.Dst() != tunnelAddr {
 			continue
 		}
 

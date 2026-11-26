@@ -1,13 +1,12 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"net/netip"
-	"time"
 )
 
 // toAddr converts a net.IP, unmapping IPv4 addresses stored in 16 bytes.
@@ -84,65 +83,51 @@ func getPublicIPv6() (*net.IPNet, *net.Interface, error) {
 	return nil, nil, fmt.Errorf("No global IPv6 address found")
 }
 
-// CalculateChecksumDelta calculates the necessary delta value to maintain checksum neutrality.
-func calculateChecksumDelta(ipv4 net.IP, ipv6 net.IP) uint16 {
-	sum := func(data []byte) uint32 {
-		var s uint32
-		for i := 0; i < len(data)-1; i += 2 {
-			s += uint32(binary.BigEndian.Uint16(data[i:]))
-		}
-		return s
+// onesComplementSum folds the 16-bit words of data into a ones' complement sum, as the internet checksum does.
+func onesComplementSum(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i+1 < len(data); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(data[i:]))
 	}
 
-	// Calculate the initial checksum over the IPv4 address and lower 8 bytes of IPv6
-	ipv4PseudoPartial := make([]byte, 12)
-	copy(ipv4PseudoPartial[0:4], ipv4)
-	ipSum := sum(ipv4PseudoPartial) + sum(ipv6[8:])
-
-	// The checksum delta we need to apply
-	delta := -int16((ipSum + (ipSum >> 16)) & 0xFFFF)
-	return uint16(delta)
-}
-
-// GenerateRandomBytes generates random bytes for the non-checksum-neutral part using a custom random source.
-func generateRandomBytes(length int, seed int64) []byte {
-	r := rand.New(rand.NewSource(seed)) // Use a new random source with the specified seed
-	bytes := make([]byte, length)
-	for i := range bytes {
-		bytes[i] = byte(r.Intn(256))
+	for sum > 0xffff {
+		sum = (sum & 0xffff) + (sum >> 16)
 	}
-	return bytes
+
+	return uint16(sum)
 }
 
+func onesComplementAdd(a, b uint16) uint16 {
+	sum := uint32(a) + uint32(b)
+	return uint16(sum&0xffff + sum>>16)
+}
+
+// generateIPv6Address returns a random address in ipv6Net that ends in ipv4Addr and is checksum-neutral to it (as
+// described in RFC 6052 Section 4.1), so translating between the two leaves transport checksums unchanged. It is used
+// through an EAM entry, not as an RFC 6052 address. Bytes 10-11 balance the sum, so the prefix can be at most /80.
 func generateIPv6Address(ipv4Addr net.IP, ipv6Net *net.IPNet) (net.IP, error) {
-	// Parse the IPv4 address
 	ipv4 := ipv4Addr.To4()
 	if ipv4 == nil {
-		return nil, fmt.Errorf("invalid IPv4 address, not in 4-byte format")
+		return nil, fmt.Errorf("invalid IPv4 address %s", ipv4Addr)
 	}
 
-	prefixLen, _ := ipv6Net.Mask.Size()
+	prefixLen, bits := ipv6Net.Mask.Size()
+	if bits != 8*net.IPv6len || prefixLen > 80 {
+		return nil, fmt.Errorf("IPv6 prefix %s must be /80 or shorter to generate an address in it "+
+			"(a /128 address, as DHCPv6 hands out, is not supported)", ipv6Net)
+	}
 
-	// Construct initial IPv6 with the prefix
 	ipv6 := make(net.IP, net.IPv6len)
-	copy(ipv6, ipv6Net.IP)
-
-	// Define where the IPv4 embedded address starts
-	startIdx := prefixLen / 8
-
-	// Fill the remaining bytes with random values and control checksum neutrality
-	if startIdx < 12 {
-		// Fill the middle part with random values using a seed based on the current time
-		copy(ipv6[startIdx:12], generateRandomBytes(12-startIdx, time.Now().UnixNano()))
+	rand.Read(ipv6[:10]) // never fails since Go 1.24
+	for i := range ipv6[:10] {
+		ipv6[i] = ipv6Net.IP[i]&ipv6Net.Mask[i] | ipv6[i]&^ipv6Net.Mask[i]
 	}
 
-	// Embed the checksum-neutral IPv4 value
-	binary.BigEndian.PutUint32(ipv6[12:], binary.BigEndian.Uint32(ipv4))
+	copy(ipv6[12:], ipv4)
 
-	// Calculate necessary checksum-neutral delta
-	delta := calculateChecksumDelta(ipv4, ipv6)
-	ipv6[15] -= byte(delta & 0xFF)
+	// Bytes 10-11 are still zero, so this is the sum of everything else.
+	balance := onesComplementAdd(onesComplementSum(ipv4), ^onesComplementSum(ipv6))
+	binary.BigEndian.PutUint16(ipv6[10:], balance)
 
-	// Return the generated IPv6 address
 	return ipv6, nil
 }
