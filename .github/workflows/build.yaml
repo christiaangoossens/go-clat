@@ -36,3 +36,36 @@ jobs:
       with:
         name: go-clat-amd64
         path: go-clat
+
+  integration:
+    # Runs as root in a privileged container instead of using sudo. On the runner itself, Ubuntu's AppArmor blocks the
+    # user namespace the test creates.
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      options: --privileged
+
+    steps:
+    - name: Install ip6tables
+      run: apt-get update && apt-get install -y --no-install-recommends ca-certificates iptables
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          integration/go.sum
+
+    - name: Load the kernel's IPv6 NAT support
+      # The test's user namespace cannot load kernel modules, this privileged container can.
+      run: ip6tables -t nat -A POSTROUTING -j SNAT --to-source ::1 && ip6tables -t nat -F POSTROUTING
+
+    - name: Vet
+      run: go -C integration vet ./...
+
+    - name: Integration tests
+      run: go -C integration test -count=1 -v ./...
