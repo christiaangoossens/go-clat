@@ -1,4 +1,4 @@
-name: Build and upload binary for amd64
+name: CI
 
 on:
   push:
@@ -8,9 +8,14 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  unit:
+    name: Unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
     - name: Checkout code
@@ -27,20 +32,12 @@ jobs:
     - name: Unit tests
       run: go test ./...
 
-    - name: Build
-      run: |
-        GOOS=linux GOARCH=amd64 go build -o go-clat
-
-    - name: Upload binary as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: go-clat-amd64
-        path: go-clat
-
   integration:
+    name: Integration tests
     # Runs as root in a privileged container instead of using sudo. On the runner itself, Ubuntu's AppArmor blocks the
     # user namespace the test creates.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     container:
       image: debian:trixie
       options: --privileged
@@ -69,3 +66,27 @@ jobs:
 
     - name: Integration tests
       run: go -C integration test -count=1 -v ./...
+
+  build:
+    name: Build and upload binary for amd64
+    needs: [unit, integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version-file: go.mod
+
+    - name: Build
+      run: GOOS=linux GOARCH=amd64 go build -o go-clat
+
+    - name: Upload binary as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: go-clat-amd64
+        path: go-clat
