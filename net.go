@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
 	"slices"
 
 	"github.com/songgao/water"
@@ -216,46 +215,6 @@ func removeIPv6Address(iface *net.Interface, addr net.IP) error {
 
 	if err := netlink.AddrDel(link, netlinkAddr); err != nil {
 		return errors.New("Failed to remove the IPv6 address: " + err.Error())
-	}
-
-	return nil
-}
-
-// Use ip6tables to add necessary rules
-func configureIptables(ip1 net.IP, ip2 net.IP, pubFace string) error {
-	// Add a DNAT rule to forward packets from ip1 to ip2
-	err := exec.Command(
-		"ip6tables",
-		"-t", "nat",
-		"-I", "POSTROUTING",
-		"-o", pubFace,
-		"-s", ip2.String(),
-		"-j", "SNAT",
-		"--to-source", ip1.String(),
-	).Run()
-
-	if err != nil {
-		return errors.New("Failed to add the SNAT rule: " + err.Error())
-	}
-
-	return nil
-}
-
-// Remove the iptables config
-func deconfigureIptables(ip1 net.IP, ip2 net.IP, pubFace string) error {
-	// Remove the DNAT rule
-	err := exec.Command(
-		"ip6tables",
-		"-t", "nat",
-		"-D", "POSTROUTING",
-		"-o", pubFace,
-		"-s", ip2.String(),
-		"-j", "SNAT",
-		"--to-source", ip1.String(),
-	).Run()
-
-	if err != nil {
-		return errors.New("Failed to remove the SNAT rule: " + err.Error())
 	}
 
 	return nil

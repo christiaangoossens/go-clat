@@ -7,6 +7,9 @@ import (
 	"log"
 	"net"
 	"net/netip"
+
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // toAddr converts a net.IP, unmapping IPv4 addresses stored in 16 bytes.
@@ -52,48 +55,61 @@ type ipv6Candidate struct {
 	iface  net.Interface
 }
 
-// getPublicIPv6 returns the prefix and interface to send translated packets from.
-func getPublicIPv6() (*net.IPNet, *net.Interface, error) {
-	candidates, err := ipv6Candidates()
+// getPublicIPv6 returns the prefix and interface to send translated packets from: a prefix on the interface that the
+// kernel routes the NAT64 prefix through. Other interfaces, such as a VPN with a global prefix of its own, are not used.
+func getPublicIPv6(nat64Net *net.IPNet) (*net.IPNet, *net.Interface, error) {
+	iface, err := uplinkTo(nat64Net)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	candidates, err := ipv6Candidates(iface)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	chosen, err := choosePublicIPv6(candidates)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w on interface %s, which routes to the NAT64 prefix %s", err, iface.Name, nat64Net)
 	}
 
 	log.Printf("Discovered IPv6 prefix %s on interface %s", chosen.prefix, chosen.iface.Name)
 	return chosen.prefix, &chosen.iface, nil
 }
 
-func ipv6Candidates() ([]ipv6Candidate, error) {
-	interfaces, err := net.Interfaces()
+// uplinkTo returns the interface the kernel routes the NAT64 prefix through.
+func uplinkTo(nat64Net *net.IPNet) (*net.Interface, error) {
+	routes, err := netlink.RouteGet(nat64Net.IP)
+	if err != nil || len(routes) == 0 {
+		return nil, fmt.Errorf("No IPv6 route to the NAT64 prefix %s: %v", nat64Net, err)
+	}
+
+	return net.InterfaceByIndex(routes[0].LinkIndex)
+}
+
+// ipv6Candidates returns the prefixes of the interface's addresses that go-clat can generate its own address in. It
+// skips addresses that are deprecated or failed duplicate address detection, and prefixes longer than /80, such as
+// the /128 address DHCPv6 hands out.
+func ipv6Candidates(iface *net.Interface) ([]ipv6Candidate, error) {
+	link, err := netlink.LinkByIndex(iface.Index)
+	if err != nil {
+		return nil, err
+	}
+
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
 	if err != nil {
 		return nil, err
 	}
 
 	var candidates []ipv6Candidate
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+	for _, addr := range addrs {
+		ones, _ := addr.Mask.Size()
+		if ones > 80 || addr.Flags&(unix.IFA_F_DEPRECATED|unix.IFA_F_DADFAILED) != 0 {
 			continue
 		}
 
-		addrs, err := iface.Addrs()
-		if err != nil {
-			return nil, err
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok || ipNet.IP.To4() != nil {
-				continue
-			}
-
-			prefix := &net.IPNet{IP: ipNet.IP.Mask(ipNet.Mask), Mask: ipNet.Mask}
-			candidates = append(candidates, ipv6Candidate{prefix: prefix, iface: iface})
-		}
+		prefix := &net.IPNet{IP: addr.IP.Mask(addr.Mask), Mask: addr.Mask}
+		candidates = append(candidates, ipv6Candidate{prefix: prefix, iface: *iface})
 	}
 
 	return candidates, nil

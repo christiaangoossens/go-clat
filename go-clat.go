@@ -43,7 +43,7 @@ func app(nat64Prefix string) int {
 	}
 
 	// Generate the IPv6 addrs to use to send & receive packets
-	ipv6Prefix, ipv6Iface, err := getPublicIPv6()
+	ipv6Prefix, ipv6Iface, err := getPublicIPv6(nat64Net)
 	if err != nil {
 		log.Print(err)
 		return 1
@@ -100,16 +100,16 @@ func app(nat64Prefix string) int {
 		log.Printf("Removed extra IPv6 address")
 	}()
 
-	// Perform the neccesary firewall settings
-	err = configureIptables(publicIPv6Addr, tunnelIPv6NetSrcIP, ipv6Iface.Name)
-	if err != nil {
-		log.Print(err)
+	// SNAT to the public address, and let the replies through the firewall
+	rules := firewallRules(publicIPv6Addr, tunnelIPv6NetSrcIP, ipv6Iface.Name, iface6.Name())
+	if err := configureFirewall(rules); err != nil {
+		log.Printf("Error adding the ip6tables rules: %v", err)
 		return 1
 	}
 
 	defer func() {
-		if err := deconfigureIptables(publicIPv6Addr, tunnelIPv6NetSrcIP, ipv6Iface.Name); err != nil {
-			log.Printf("Error removing the SNAT rule: %v", err)
+		if err := deconfigureFirewall(rules); err != nil {
+			log.Printf("Error removing the ip6tables rules: %v", err)
 			return
 		}
 

@@ -9,5 +9,5 @@ require (
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.48.0
 )
