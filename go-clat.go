@@ -2,16 +2,10 @@ package main
 
 import (
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-
-	"github.com/christiaangoossens/go-siit"
 )
 
 func app() int {
@@ -61,9 +55,8 @@ func app() int {
 
 	// Generate the IPv6 tunnel
 	tunnelIPv6NetIP, tunnelIPv6NetSrcIP := getIPv6TunNet(ipv4TunnelAddr)
-	iface6, err6 := createIPv6Tun(tunnelIPv6NetIP)
-
-	if err6 != nil {
+	iface6, err := createIPv6Tun(tunnelIPv6NetIP)
+	if err != nil {
 		log.Print(err)
 		return 1
 	}
@@ -122,132 +115,26 @@ func app() int {
 		log.Printf("Removed IPv6 iptables config for go-clat")
 	}()
 
-	// Create translator
-	translator, err := siit.NewTranslator(nat64Net, getIPv4RouterAddress(), siit.RawEAMTable{
-		{
-			IPv4Prefix: ipv4TunnelAddr.String(),
-			IPv6Prefix: tunnelIPv6NetSrcIP.String(),
-		},
-	})
+	translator, err := newTranslator(nat64Net, publicIPv6Addr, tunnelIPv6NetSrcIP)
 	if err != nil {
 		log.Printf("Error creating translator: %v", err)
 		return 1
 	}
 
-	/** ====
-	 * SETUP DONE!
-	 * =====
-	 */
+	sender, err := newIPv6Sender()
+	if err != nil {
+		log.Print(err)
+		return 1
+	}
+	defer sender.Close()
 
-	// All done, now listen for packets!
+	log.Printf("Translating between %s and %s", iface.Name(), iface6.Name())
 	go func() {
-		// IPv6
-		log.Printf("Listening for incoming IPv6 packets on %s", iface6.Name())
-		packet := make([]byte, 2000)
-		for {
-			n, err := iface6.Read(packet)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			// Parse the IPv6 packet
-			// Use gopacket to parse the IPv4 packet
-			packetData := packet[:n]
-			packet := gopacket.NewPacket(packetData, layers.LayerTypeIPv6, gopacket.Default)
-
-			ipLayer := packet.Layer(layers.LayerTypeIPv6)
-			if ipLayer == nil {
-				// Not IPv6 packet, ignore because we are only translating IPv6 here
-				continue
-			}
-
-			ip, _ := ipLayer.(*layers.IPv6)
-
-			// If dest is not the tunneladdr, drop it, we are only interested in return packets
-			if !ip.DstIP.Equal(tunnelIPv6NetSrcIP) {
-				continue
-			}
-
-			// If the packet is not from the nat64 prefix, drop it
-			if !nat64Net.Contains(ip.SrcIP) && ip.NextLayerType() != layers.LayerTypeICMPv6 {
-				log.Printf("Dropping non-ICMP packet with wrong source %s", ip.SrcIP)
-				continue
-			}
-
-			// Translate the packet to IPv4
-			result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-			if err != nil {
-				log.Printf("Error translating IPv6 packet: %v", err)
-				continue
-			}
-
-			// Put the resulting packet back onto the IPv4 interface
-			if result.Packet == nil {
-				log.Printf("Dropping incoming IPv6 packet to %s (%s), Next Layer: %s",
-					ip.DstIP, result.DstIP, ip.NextLayerType())
-				continue
-			}
-
-			// Log the result packet
-			//log.Printf("Translated IPv6 packet to %x", result)
-
-			_, err = iface.Write(result.Packet)
-			if err != nil {
-				log.Printf("Error writing packet to IPv4 interface: %v", err)
-			}
-		}
+		log.Fatal(translateIPv4Loop(translator, iface, sender.Send))
 	}()
 
 	go func() {
-		// IPv4
-		log.Printf("Listening for incoming IPv4 packets on %s", iface.Name())
-		packet := make([]byte, 2000)
-		for {
-			n, err := iface.Read(packet)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			// Parse the IPv4 packet
-			// Use gopacket to parse the IPv4 packet
-			packetData := packet[:n]
-			packet := gopacket.NewPacket(packetData, layers.LayerTypeIPv4, gopacket.Default)
-
-			ipLayer := packet.Layer(layers.LayerTypeIPv4)
-			if ipLayer == nil {
-				// Not IPv4 packet, ignore because we are only translating IPv4 here
-				continue
-			}
-
-			ip, _ := ipLayer.(*layers.IPv4)
-
-			// https://datatracker.ietf.org/doc/html/rfc6145
-			// Safeguards
-
-			// If src is wrong, drop the packet
-			if !ip.SrcIP.Equal(ipv4TunnelAddr) {
-				continue
-			}
-
-			// Translate the packet to IPv6
-			result, err := translator.TranslateIPv4(packet, siit.TranslationOverrides{})
-
-			if result.Packet == nil {
-				// We shouldn't translate this packet
-				log.Printf("Dropping IPv4 packet to %s (%s), Flags: %s, ID: %d, TTL: %d, Protocol: %s",
-					ip.DstIP, result.DstIP, ip.Flags, ip.Id, ip.TTL, ip.Protocol)
-				continue
-			}
-
-			if err != nil {
-				log.Printf("Error translating IPv4 packet: %v", err)
-				continue
-			}
-
-			// Log the result packet
-			//log.Printf("Translated IPv4 packet to %x", result)
-			sendPacket(result.Packet, result.DstIP, ip.Id)
-		}
+		log.Fatal(translateIPv6Loop(translator, iface6, iface, tunnelIPv6NetSrcIP))
 	}()
 
 	gracefulShutdown := make(chan os.Signal, 1)
@@ -256,30 +143,6 @@ func app() int {
 	<-gracefulShutdown
 	log.Println("Got a shutdown request, exiting gracefully...")
 	return 0
-}
-
-func sendPacket(packet []byte, dstIP net.IP, id uint16) {
-	// Open a raw socket for sending the translated packet
-	fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
-	if err != nil {
-		log.Printf("Error creating raw socket: %v", err)
-		return
-	}
-
-	// Destination address for the packet
-	addr := &syscall.SockaddrInet6{
-		Port: 0,
-		Addr: [16]byte{},
-	}
-	copy(addr.Addr[:], dstIP)
-
-	// Send the packet
-	err = syscall.Sendto(fd, packet, 0, addr)
-	syscall.Close(fd)
-
-	if err != nil {
-		log.Printf("Error sending translated packet for %d: %v", id, err)
-	}
 }
 
 func main() {

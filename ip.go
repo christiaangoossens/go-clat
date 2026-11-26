@@ -6,8 +6,20 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"net/netip"
 	"time"
 )
+
+// toAddr converts a net.IP, unmapping IPv4 addresses stored in 16 bytes.
+func toAddr(ip net.IP) netip.Addr {
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.Unmap()
+}
+
+func toPrefix(ipNet *net.IPNet) netip.Prefix {
+	bits, _ := ipNet.Mask.Size()
+	return netip.PrefixFrom(toAddr(ipNet.IP), bits)
+}
 
 // Fixed IPv4 tunnel address
 // TODO: Make dynamic and actually check if it's available
