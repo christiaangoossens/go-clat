@@ -46,13 +46,35 @@ func getIPv6TunNet(ipv4Addr net.IP) (net.IP, net.IP) {
 	return ip, ip2
 }
 
+// ipv6Candidate is an IPv6 address on an interface that is up, as its prefix.
+type ipv6Candidate struct {
+	prefix *net.IPNet
+	iface  net.Interface
+}
+
+// getPublicIPv6 returns the prefix and interface to send translated packets from.
 func getPublicIPv6() (*net.IPNet, *net.Interface, error) {
-	// Get the IPv6 prefix from the first global IPv6 address
-	interfaces, err := net.Interfaces()
+	candidates, err := ipv6Candidates()
 	if err != nil {
 		return nil, nil, err
 	}
 
+	chosen, err := choosePublicIPv6(candidates)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	log.Printf("Discovered IPv6 prefix %s on interface %s", chosen.prefix, chosen.iface.Name)
+	return chosen.prefix, &chosen.iface, nil
+}
+
+func ipv6Candidates() ([]ipv6Candidate, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	var candidates []ipv6Candidate
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -60,27 +82,50 @@ func getPublicIPv6() (*net.IPNet, *net.Interface, error) {
 
 		addrs, err := iface.Addrs()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
-			if ok && ipNet.IP.To4() == nil && ipNet.IP.IsGlobalUnicast() {
-				// Get the prefix from this address
-				_, ipNet, err := net.ParseCIDR(ipNet.String())
-				if err != nil {
-					return nil, nil, err
-				}
-
-				// Log the prefix found
-				log.Printf("Discovered IPv6 prefix %s on interface %s", ipNet, iface.Name)
-
-				return ipNet, &iface, nil
+			if !ok || ipNet.IP.To4() != nil {
+				continue
 			}
+
+			prefix := &net.IPNet{IP: ipNet.IP.Mask(ipNet.Mask), Mask: ipNet.Mask}
+			candidates = append(candidates, ipv6Candidate{prefix: prefix, iface: iface})
 		}
 	}
 
-	return nil, nil, fmt.Errorf("No global IPv6 address found")
+	return candidates, nil
+}
+
+// choosePublicIPv6 picks the first global unicast prefix. Go counts unique local addresses (fc00::/7) as global
+// unicast, but they cannot reach a NAT64 service on the internet, so a ULA is only chosen when there is nothing else
+// (for example a NAT64 on the local router).
+func choosePublicIPv6(candidates []ipv6Candidate) (ipv6Candidate, error) {
+	var ula *ipv6Candidate
+
+	for i, candidate := range candidates {
+		ip := candidate.prefix.IP
+		if !ip.IsGlobalUnicast() {
+			continue
+		}
+
+		if !ip.IsPrivate() {
+			return candidate, nil
+		}
+
+		if ula == nil {
+			ula = &candidates[i]
+		}
+	}
+
+	if ula != nil {
+		log.Printf("No global IPv6 address found, using unique local prefix %s", ula.prefix)
+		return *ula, nil
+	}
+
+	return ipv6Candidate{}, fmt.Errorf("No global IPv6 address found")
 }
 
 // onesComplementSum folds the 16-bit words of data into a ones' complement sum, as the internet checksum does.
