@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"slices"
 
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
@@ -43,7 +44,24 @@ func getNAT64PrefixFromDNS() (*net.IPNet, error) {
 	)
 }
 
-func getNAT64Prefix() (*net.IPNet, error) {
+// getNAT64Prefix returns the configured prefix, or discovers it through DNS64 when none is configured.
+func getNAT64Prefix(configured string) (*net.IPNet, error) {
+	if configured != "" {
+		_, prefix, err := net.ParseCIDR(configured)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid NAT64 prefix: %w", err)
+		}
+
+		// Check here, before go-clat changes anything on the system, which prefixes RFC 6052 allows.
+		length, _ := prefix.Mask.Size()
+		if prefix.IP.To4() != nil || !slices.Contains([]int{32, 40, 48, 56, 64, 96}, length) {
+			return nil, fmt.Errorf("Invalid NAT64 prefix %s: it must be IPv6 and /32, /40, /48, /56, /64 or /96", configured)
+		}
+
+		log.Printf("Using the configured NAT64 prefix %s", prefix)
+		return prefix, nil
+	}
+
 	// Get the NAT64 prefix from the DNS64 server
 	nat64Prefix, err := getNAT64PrefixFromDNS()
 	if err != nil {
@@ -143,8 +161,10 @@ func createIPv6Tun(tunnelAddr net.IP) (*water.Interface, error) {
 		return nil, errors.New("Failed to set multicast off: " + err.Error())
 	}
 
-	// Set MTU to 1280
-	if err := netlink.LinkSetMTU(link, 1280); err != nil {
+	// Set MTU to 1500, the usual MTU of the uplink, so the kernel can forward any packet from the internet into this
+	// tun. With a smaller MTU it would answer Packet Too Big and drop the first large UDP reply. Outgoing packets do not
+	// use this tun; their size is limited by the IPv4 tun.
+	if err := netlink.LinkSetMTU(link, 1500); err != nil {
 		return nil, errors.New("Failed to set the MTU: " + err.Error())
 	}
 

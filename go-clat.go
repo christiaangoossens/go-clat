@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"os"
 	"os/exec"
@@ -8,7 +9,8 @@ import (
 	"syscall"
 )
 
-func app() int {
+// app runs go-clat until it gets a shutdown signal. An empty nat64Prefix means: discover it through DNS64.
+func app(nat64Prefix string) int {
 	log.Printf("Starting go-clat")
 
 	// Check pre-requisites
@@ -25,7 +27,7 @@ func app() int {
 	}
 
 	// Obtain the NAT64 prefix
-	nat64Net, err := getNAT64Prefix()
+	nat64Net, err := getNAT64Prefix(nat64Prefix)
 	if err != nil {
 		log.Print(err)
 		return 1
@@ -61,26 +63,21 @@ func app() int {
 		return 1
 	}
 
-	// Check if ipv6 forwarding is enabled for the interface found
-	// Otherwise no packets will come in
-	settingName := "net.ipv6.conf.all.forwarding=1"
-
-	cmd := exec.Command("sysctl", "-n", settingName)
-	output, err := cmd.Output()
+	// Forward the replies from the uplink to the IPv6 tun, otherwise no packets will come in
+	forwarding, err := enableIPv6Forwarding()
 	if err != nil {
-		log.Printf("Error checking IPv6 forwarding: %v", err)
+		log.Printf("Error enabling IPv6 forwarding: %v", err)
 		return 1
 	}
 
-	if string(output) != "1\n" {
-		// Automatically enable forwarding by running sysctl -w
-		cmd := exec.Command("sysctl", "-w", settingName)
-		if err := cmd.Run(); err != nil {
-			log.Printf("Error enabling IPv6 forwarding: %v", err)
-			log.Printf("IPv6 forwarding is not enabled. Please enable it by running: sysctl -w %s", settingName)
-			return 1
+	defer func() {
+		if err := forwarding.restore(); err != nil {
+			log.Printf("Error restoring the IPv6 forwarding settings: %v", err)
+			return
 		}
-	}
+
+		log.Printf("Restored the IPv6 forwarding settings")
+	}()
 
 	// Log all addresses for debugging
 	log.Printf("IPv6 public address: %s", publicIPv6Addr)
@@ -97,7 +94,9 @@ func app() int {
 	defer func() {
 		if err := removeIPv6Address(ipv6Iface, publicIPv6Addr); err != nil {
 			log.Printf("Error removing IPv6 address: %v", err)
+			return
 		}
+
 		log.Printf("Removed extra IPv6 address")
 	}()
 
@@ -110,8 +109,10 @@ func app() int {
 
 	defer func() {
 		if err := deconfigureIptables(publicIPv6Addr, tunnelIPv6NetSrcIP, ipv6Iface.Name); err != nil {
-			log.Printf("Error removing IPv6 address: %v", err)
+			log.Printf("Error removing the SNAT rule: %v", err)
+			return
 		}
+
 		log.Printf("Removed IPv6 iptables config for go-clat")
 	}()
 
@@ -128,23 +129,29 @@ func app() int {
 	}
 	defer sender.Close()
 
+	// The loops only return on an error. Returning from app then runs the cleanup above, which log.Fatal would skip.
 	log.Printf("Translating between %s and %s", iface.Name(), iface6.Name())
-	go func() {
-		log.Fatal(translateIPv4Loop(translator, iface, sender.Send))
-	}()
-
-	go func() {
-		log.Fatal(translateIPv6Loop(translator, iface6, iface, tunnelIPv6NetSrcIP))
-	}()
+	translationErrors := make(chan error, 2)
+	go func() { translationErrors <- translateIPv4Loop(translator, iface, sender.Send) }()
+	go func() { translationErrors <- translateIPv6Loop(translator, iface6, iface, tunnelIPv6NetSrcIP) }()
 
 	gracefulShutdown := make(chan os.Signal, 1)
 	signal.Notify(gracefulShutdown, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	<-gracefulShutdown
-	log.Println("Got a shutdown request, exiting gracefully...")
-	return 0
+	select {
+	case <-gracefulShutdown:
+		log.Println("Got a shutdown request, exiting gracefully...")
+		return 0
+
+	case err := <-translationErrors:
+		log.Printf("Translation stopped: %v", err)
+		return 1
+	}
 }
 
 func main() {
-	os.Exit(app())
+	nat64Prefix := flag.String("nat64-prefix", "", "NAT64 prefix to use, such as 64:ff9b::/96 (default: discover it through DNS64)")
+	flag.Parse()
+
+	os.Exit(app(*nat64Prefix))
 }
